@@ -1,0 +1,120 @@
+# Django Messaging App Kubernetes Deployment
+# ALX Backend Python Project - messaging_app
+
+---
+# Deployment Configuration
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-messaging-app
+  labels:
+    app: django-messaging-app
+    component: web
+    project: alx-backend-python
+spec:
+  replicas: 2  # Run 2 instances for redundancy
+  selector:
+    matchLabels:
+      app: django-messaging-app
+  template:
+    metadata:
+      labels:
+        app: django-messaging-app
+        component: web
+    spec:
+      containers:
+      - name: django-app
+        # Replace with your actual Docker image
+        # Format: username/repository:tag or registry.com/username/repository:tag
+        image: django-messaging-app:latest
+        imagePullPolicy: IfNotPresent  # Use local image if available
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        
+        # Environment variables for Django
+        env:
+        - name: DEBUG
+          value: "False"
+        - name: ALLOWED_HOSTS
+          value: "*"  # In production, specify actual hosts
+        - name: DATABASE_ENGINE
+          value: "django.db.backends.sqlite3"
+        - name: DATABASE_NAME
+          value: "/app/db.sqlite3"
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        # Resource limits and requests
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        
+        # Volume mounts (if needed for static files or database)
+        volumeMounts:
+        - name: app-storage
+          mountPath: /app/db
+      
+      volumes:
+      - name: app-storage
+        emptyDir: {}
+      
+      # Restart policy
+      restartPolicy: Always
+
+---
+# Service Configuration (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: django-messaging-service
+  labels:
+    app: django-messaging-app
+    component: web
+spec:
+  type: ClusterIP  # Internal access only as requested
+  selector:
+    app: django-messaging-app
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  
+  # Session affinity (optional - for sticky sessions)
+  sessionAffinity: None
+
+---
+# Optional: ConfigMap for Django settings
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: django-config
+  labels:
+    app: django-messaging-app
+data:
+  DJANGO_SETTINGS_MODULE: "messaging_app.settings"
+  ALLOWED_HOSTS: "*"
+  DEBUG: "False"

@@ -1,0 +1,327 @@
+name: Django Messaging App CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root_password123
+          MYSQL_DATABASE: test_messaging_app_db
+          MYSQL_USER: test_user
+          MYSQL_PASSWORD: test_password123
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+
+    strategy:
+      matrix:
+        python-version: [3.10.x, 3.11.x]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          default-libmysqlclient-dev \
+          build-essential \
+          pkg-config \
+          python3-dev
+
+    - name: Install Python dependencies
+      working-directory: ./messaging_app
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-django pytest-html pytest-cov coverage
+        pip install mysqlclient
+        pip install flake8
+
+    - name: Wait for MySQL to be ready
+      run: |
+        timeout 60 bash -c 'until mysqladmin ping -h 127.0.0.1 -P 3306 -u root -proot_password123 --silent; do sleep 1; done'
+
+    - name: Set up environment variables
+      working-directory: ./messaging_app
+      run: |
+        echo "DJANGO_SETTINGS_MODULE=messaging_app.test_settings" >> $GITHUB_ENV
+        echo "DB_HOST=127.0.0.1" >> $GITHUB_ENV
+        echo "DB_PORT=3306" >> $GITHUB_ENV
+        echo "DB_NAME=test_messaging_app_db" >> $GITHUB_ENV
+        echo "DB_USER=test_user" >> $GITHUB_ENV
+        echo "DB_PASSWORD=test_password123" >> $GITHUB_ENV
+        echo "DJANGO_SECRET_KEY=github-actions-test-secret-key-12345" >> $GITHUB_ENV
+        echo "DEBUG=True" >> $GITHUB_ENV
+
+    - name: Run flake8 linting
+      working-directory: ./messaging_app
+      run: |
+        echo "Running flake8 linting checks..."
+        flake8 --max-line-length=120 \
+               --exclude=migrations,venv,__pycache__,.git,*.pyc,*.pyo,env,node_modules \
+               --extend-ignore=E203,W503 \
+               --max-complexity=10 \
+               --count \
+               --statistics \
+               .
+
+    - name: Run database migrations
+      working-directory: ./messaging_app
+      run: |
+        python manage.py makemigrations --settings=messaging_app.test_settings
+        python manage.py migrate --settings=messaging_app.test_settings
+
+    - name: Run Django tests with coverage
+      working-directory: ./messaging_app
+      run: |
+        coverage run --source='.' manage.py test --settings=messaging_app.test_settings --verbosity=2
+        coverage report
+        coverage xml -o coverage-reports/django-coverage.xml
+        coverage html -d coverage-reports/django-coverage-html
+
+    - name: Run pytest tests with coverage
+      working-directory: ./messaging_app
+      run: |
+        python -m pytest \
+          --html=test-reports/pytest-report.html \
+          --self-contained-html \
+          --cov=. \
+          --cov-report=html:test-reports/coverage-html \
+          --cov-report=xml:test-reports/coverage.xml \
+          --cov-report=term-missing \
+          --cov-fail-under=70 \
+          --junitxml=test-reports/junit.xml \
+          -v \
+          chats/tests.py chats/test_auth.py
+
+    - name: Generate coverage badge
+      working-directory: ./messaging_app
+      run: |
+        pip install coverage-badge
+        coverage-badge -o coverage-reports/coverage-badge.svg
+        echo "Coverage badge generated"
+
+    - name: Upload test reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-reports-python-${{ matrix.python-version }}
+        path: |
+          messaging_app/test-reports/
+          messaging_app/coverage-reports/
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      if: matrix.python-version == '3.10.x'
+      with:
+        file: messaging_app/test-reports/coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.10.x
+
+    - name: Install linting dependencies
+      working-directory: ./messaging_app
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black isort pylint bandit safety
+
+    - name: Create reports directory
+      working-directory: ./messaging_app
+      run: |
+        mkdir -p lint-reports
+
+    - name: Run flake8 linting (strict)
+      working-directory: ./messaging_app
+      run: |
+        echo "Running flake8 linting with strict settings..."
+        flake8 --max-line-length=120 \
+               --exclude=migrations,venv,__pycache__,.git,*.pyc,*.pyo,env,node_modules \
+               --extend-ignore=E203,W503 \
+               --max-complexity=10 \
+               --count \
+               --statistics \
+               --output-file=lint-reports/flake8-report.txt \
+               --tee \
+               .
+        echo "Flake8 linting completed successfully"
+
+    - name: Run Black (code formatting check)
+      working-directory: ./messaging_app
+      run: |
+        echo "Checking code formatting with Black..."
+        black --check --diff --color . > lint-reports/black-report.txt 2>&1 || {
+          echo "Black formatting check failed"
+          cat lint-reports/black-report.txt
+          exit 1
+        }
+        echo "Black formatting check passed"
+
+    - name: Run isort (import sorting check)
+      working-directory: ./messaging_app
+      run: |
+        echo "Checking import sorting with isort..."
+        isort --check-only --diff --color . > lint-reports/isort-report.txt 2>&1 || {
+          echo "Import sorting check failed"
+          cat lint-reports/isort-report.txt
+          exit 1
+        }
+        echo "Import sorting check passed"
+
+    - name: Run pylint
+      working-directory: ./messaging_app
+      run: |
+        echo "Running pylint analysis..."
+        pylint --load-plugins=pylint_django \
+               --django-settings-module=messaging_app.settings \
+               --output-format=text \
+               --reports=yes \
+               --score=yes \
+               chats/ > lint-reports/pylint-report.txt 2>&1 || {
+          echo "Pylint analysis completed with warnings"
+        }
+        echo "Pylint analysis completed"
+
+    - name: Upload lint reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: lint-reports
+        path: messaging_app/lint-reports/
+
+  security:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.10.x
+
+    - name: Install security scanning tools
+      working-directory: ./messaging_app
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit semgrep
+
+    - name: Create security reports directory
+      working-directory: ./messaging_app
+      run: |
+        mkdir -p security-reports
+
+    - name: Run Safety (dependency vulnerability check)
+      working-directory: ./messaging_app
+      run: |
+        echo "Running Safety dependency vulnerability check..."
+        safety check --json --output security-reports/safety-report.json || {
+          echo "Safety check found vulnerabilities"
+          safety check
+          exit 1
+        }
+        echo "Safety check completed successfully"
+
+    - name: Run Bandit (security linting)
+      working-directory: ./messaging_app
+      run: |
+        echo "Running Bandit security analysis..."
+        bandit -r . \
+               -f json \
+               -o security-reports/bandit-report.json \
+               -x migrations,venv,__pycache__,.git,env,node_modules || {
+          echo "Bandit found security issues"
+          bandit -r . -x migrations,venv,__pycache__,.git,env,node_modules
+          exit 1
+        }
+        echo "Bandit security analysis completed successfully"
+
+    - name: Run Semgrep (additional security scanning)
+      working-directory: ./messaging_app
+      run: |
+        echo "Running Semgrep security analysis..."
+        semgrep --config=auto --json --output=security-reports/semgrep-report.json . || {
+          echo "Semgrep analysis completed with findings"
+        }
+        echo "Semgrep analysis completed"
+
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-reports
+        path: messaging_app/security-reports/
+
+  code-quality-summary:
+    runs-on: ubuntu-latest
+    needs: [test, lint, security]
+    if: always()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Generate quality summary
+      run: |
+        echo "# Code Quality Summary" > quality-summary.md
+        echo "" >> quality-summary.md
+        echo "## Test Results" >> quality-summary.md
+        echo "- Tests: ${{ needs.test.result }}" >> quality-summary.md
+        echo "- Linting: ${{ needs.lint.result }}" >> quality-summary.md
+        echo "- Security: ${{ needs.security.result }}" >> quality-summary.md
+        echo "" >> quality-summary.md
+        echo "## Artifacts Generated" >> quality-summary.md
+        echo "- Test reports with coverage" >> quality-summary.md
+        echo "- Linting reports (flake8, black, isort, pylint)" >> quality-summary.md
+        echo "- Security reports (safety, bandit, semgrep)" >> quality-summary.md
+        echo "" >> quality-summary.md
+        echo "Generated on: $(date)" >> quality-summary.md
+
+    - name: Upload quality summary
+      uses: actions/upload-artifact@v3
+      with:
+        name: code-quality-summary
+        path: quality-summary.md

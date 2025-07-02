@@ -1,0 +1,258 @@
+#!/bin/bash
+
+# kubctl-0x01 - Kubernetes Scaling and Load Testing Script
+# ALX Backend Python - Messaging App Project
+# This script scales Django deployment, verifies pods, performs load testing, and monitors resources
+
+set -e  # Exit on any error
+
+echo "Kubernetes Scaling and Load Testing Script"
+echo "============================================="
+
+# Function to check if command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Function to print colored output
+print_success() {
+    echo -e "\033[32m✅ $1\033[0m"
+}
+
+print_error() {
+    echo -e "\033[31m❌ $1\033[0m"
+}
+
+print_info() {
+    echo -e "\033[34mℹ️  $1\033[0m"
+}
+
+print_warning() {
+    echo -e "\033[33m⚠️  $1\033[0m"
+}
+
+print_header() {
+    echo ""
+    echo "🔧 $1"
+    echo "$(printf '=%.0s' {1..50})"
+}
+
+# Variables
+DEPLOYMENT_NAME="django-messaging-app"
+SERVICE_NAME="django-messaging-service"
+TARGET_REPLICAS=3
+LOAD_TEST_DURATION="30s"
+LOAD_TEST_CONNECTIONS=10
+LOAD_TEST_THREADS=2
+
+# Check prerequisites
+print_header "Checking Prerequisites"
+
+# Check if kubectl is available
+if ! command_exists kubectl; then
+    print_error "kubectl is not installed or not in PATH"
+    exit 1
+fi
+print_success "kubectl is available"
+
+# Check if cluster is accessible
+if ! kubectl cluster-info >/dev/null 2>&1; then
+    print_error "Cannot connect to Kubernetes cluster"
+    print_info "Make sure your cluster is running: minikube start"
+    exit 1
+fi
+print_success "Kubernetes cluster is accessible"
+
+# Check if deployment exists
+if ! kubectl get deployment "$DEPLOYMENT_NAME" >/dev/null 2>&1; then
+    print_error "Deployment '$DEPLOYMENT_NAME' not found"
+    print_info "Make sure you have deployed your Django app first using deployment.yaml"
+    exit 1
+fi
+print_success "Django deployment found"
+
+# Check if wrk is installed
+if ! command_exists wrk; then
+    print_warning "wrk is not installed. Installing wrk for load testing..."
+    
+    # Install wrk based on the system
+    if command_exists apt-get; then
+        sudo apt-get update && sudo apt-get install -y wrk
+    elif command_exists yum; then
+        sudo yum install -y wrk
+    elif command_exists brew; then
+        brew install wrk
+    else
+        print_error "Cannot install wrk automatically. Please install it manually."
+        print_info "Ubuntu/Debian: sudo apt-get install wrk"
+        print_info "CentOS/RHEL: sudo yum install wrk"
+        print_info "macOS: brew install wrk"
+        exit 1
+    fi
+    
+    if command_exists wrk; then
+        print_success "wrk installed successfully"
+    else
+        print_error "Failed to install wrk"
+        exit 1
+    fi
+else
+    print_success "wrk is available for load testing"
+fi
+
+# Step 1: Scale the deployment
+print_header "Scaling Django Deployment"
+
+print_info "Current deployment status:"
+kubectl get deployment "$DEPLOYMENT_NAME"
+
+print_info "Scaling deployment to $TARGET_REPLICAS replicas..."
+if kubectl scale deployment "$DEPLOYMENT_NAME" --replicas="$TARGET_REPLICAS"; then
+    print_success "Scaling command executed successfully"
+else
+    print_error "Failed to scale deployment"
+    exit 1
+fi
+
+print_info "Waiting for deployment to scale..."
+kubectl rollout status deployment/"$DEPLOYMENT_NAME" --timeout=300s
+
+print_success "Deployment scaled successfully!"
+
+# Step 2: Verify multiple pods are running
+print_header "Verifying Scaled Pods"
+
+print_info "Current pods status:"
+kubectl get pods -l app="$DEPLOYMENT_NAME" -o wide
+
+print_info "Detailed pod information:"
+kubectl get pods -l app="$DEPLOYMENT_NAME" --show-labels
+
+# Count running pods
+RUNNING_PODS=$(kubectl get pods -l app="$DEPLOYMENT_NAME" --field-selector=status.phase=Running --no-headers | wc -l)
+print_info "Number of running pods: $RUNNING_PODS"
+
+if [ "$RUNNING_PODS" -eq "$TARGET_REPLICAS" ]; then
+    print_success "All $TARGET_REPLICAS pods are running successfully!"
+else
+    print_warning "Expected $TARGET_REPLICAS pods, but found $RUNNING_PODS running"
+    print_info "Waiting a bit more for pods to be ready..."
+    sleep 10
+    RUNNING_PODS=$(kubectl get pods -l app="$DEPLOYMENT_NAME" --field-selector=status.phase=Running --no-headers | wc -l)
+    print_info "Updated running pods count: $RUNNING_PODS"
+fi
+
+# Step 3: Set up port forwarding for load testing
+print_header "Setting Up Load Testing Environment"
+
+print_info "Setting up port forwarding for load testing..."
+kubectl port-forward service/"$SERVICE_NAME" 8080:80 &
+PORT_FORWARD_PID=$!
+
+# Give port forwarding time to establish
+sleep 5
+
+# Verify port forwarding is working
+if curl -s http://localhost:8080 >/dev/null 2>&1; then
+    print_success "Port forwarding established successfully"
+    TEST_URL="http://localhost:8080"
+else
+    print_warning "Port forwarding might not be ready, trying alternative approach..."
+    # Try to get service endpoint directly
+    SERVICE_IP=$(kubectl get service "$SERVICE_NAME" -o jsonpath='{.spec.clusterIP}')
+    if [ -n "$SERVICE_IP" ]; then
+        TEST_URL="http://$SERVICE_IP"
+        print_info "Using service IP: $TEST_URL"
+    else
+        print_error "Cannot establish connection to service"
+        kill $PORT_FORWARD_PID 2>/dev/null || true
+        exit 1
+    fi
+fi
+
+# Step 4: Perform load testing
+print_header "Performing Load Testing with wrk"
+
+print_info "Load test configuration:"
+echo "  • URL: $TEST_URL"
+echo "  • Duration: $LOAD_TEST_DURATION"
+echo "  • Connections: $LOAD_TEST_CONNECTIONS"
+echo "  • Threads: $LOAD_TEST_THREADS"
+
+print_info "Starting load test..."
+echo ""
+
+# Run wrk load test
+wrk -t"$LOAD_TEST_THREADS" -c"$LOAD_TEST_CONNECTIONS" -d"$LOAD_TEST_DURATION" "$TEST_URL" || {
+    print_warning "Load test completed with some issues"
+}
+
+echo ""
+print_success "Load test completed!"
+
+# Step 5: Monitor resource usage
+print_header "Monitoring Resource Usage"
+
+# Enable metrics server if not already enabled
+print_info "Ensuring metrics server is available..."
+if ! kubectl top nodes >/dev/null 2>&1; then
+    print_warning "Metrics server not available, enabling..."
+    minikube addons enable metrics-server
+    print_info "Waiting for metrics server to be ready..."
+    sleep 30
+fi
+
+print_info "Node resource usage:"
+kubectl top nodes || print_warning "Node metrics not available yet"
+
+echo ""
+print_info "Pod resource usage:"
+kubectl top pods -l app="$DEPLOYMENT_NAME" || print_warning "Pod metrics not available yet"
+
+echo ""
+print_info "Deployment resource summary:"
+kubectl describe deployment "$DEPLOYMENT_NAME" | grep -A 10 "Pod Template"
+
+# Step 6: Additional monitoring and verification
+print_header "Additional Verification"
+
+print_info "Service endpoints:"
+kubectl get endpoints "$SERVICE_NAME"
+
+print_info "Recent events:"
+kubectl get events --sort-by=.metadata.creationTimestamp | tail -10
+
+print_info "Pod distribution across nodes:"
+kubectl get pods -l app="$DEPLOYMENT_NAME" -o wide | awk 'NR>1 {print $7}' | sort | uniq -c
+
+# Cleanup port forwarding
+print_header "Cleanup"
+if [ -n "$PORT_FORWARD_PID" ]; then
+    kill $PORT_FORWARD_PID 2>/dev/null || true
+    print_info "Port forwarding stopped"
+fi
+
+# Final summary
+print_header "Summary"
+print_success "✨ Scaling and load testing completed successfully!"
+
+echo ""
+echo "📊 Final Status:"
+echo "=================="
+FINAL_PODS=$(kubectl get pods -l app="$DEPLOYMENT_NAME" --field-selector=status.phase=Running --no-headers | wc -l)
+echo "• Deployment: $DEPLOYMENT_NAME"
+echo "• Target replicas: $TARGET_REPLICAS"
+echo "• Running pods: $FINAL_PODS"
+echo "• Load test duration: $LOAD_TEST_DURATION"
+echo "• Service: $SERVICE_NAME"
+
+echo ""
+echo "🔧 Useful commands for continued monitoring:"
+echo "============================================"
+echo "• Check pods: kubectl get pods -l app=$DEPLOYMENT_NAME"
+echo "• Monitor resources: kubectl top pods -l app=$DEPLOYMENT_NAME"
+echo "• View logs: kubectl logs -l app=$DEPLOYMENT_NAME"
+echo "• Scale further: kubectl scale deployment $DEPLOYMENT_NAME --replicas=N"
+echo "• Port forward: kubectl port-forward service/$SERVICE_NAME 8080:80"
+
+print_success "Script execution completed!"

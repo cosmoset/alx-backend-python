@@ -1,0 +1,51 @@
+# Kubernetes Ingress Setup Commands
+# ALX Backend Python Project - messaging_app
+# Commands used to set up Nginx Ingress Controller and apply Ingress configuration
+
+# 1. Enable Nginx Ingress Controller in Minikube
+minikube addons enable ingress
+
+# 2. Verify Ingress Controller is running
+kubectl get pods -n ingress-nginx
+
+# 3. Wait for Ingress Controller to be ready
+kubectl wait --namespace ingress-nginx \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=300s
+
+# 4. Apply the Ingress configuration
+kubectl apply -f ingress.yaml
+
+# 5. Verify Ingress resource was created
+kubectl get ingress
+
+# 6. Get detailed information about the Ingress
+kubectl describe ingress django-messaging-ingress
+
+# 7. Check Ingress Controller status
+kubectl get pods -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx
+
+# 8. Get Minikube IP for external access
+minikube ip
+
+# 9. Test external access (replace <MINIKUBE_IP> with actual IP)
+# curl http://<MINIKUBE_IP>/
+# curl http://<MINIKUBE_IP>/api/
+
+# 10. Optional: Set up local domain name in /etc/hosts
+# echo "$(minikube ip) django-messaging.local" | sudo tee -a /etc/hosts
+
+# 11. Test with domain name (if hosts file updated)
+# curl http://django-messaging.local/
+# curl http://django-messaging.local/api/
+
+# 12. Open in browser using minikube service
+minikube service django-messaging-service --url
+
+# 13. Monitor Ingress logs (if needed for troubleshooting)
+# kubectl logs -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx
+
+# 14. Test different paths
+# curl http://$(minikube ip)/api/
+# curl http://$(minikube ip)/admin/

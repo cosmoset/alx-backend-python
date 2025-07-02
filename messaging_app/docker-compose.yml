@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: messaging_app_db
+    restart: always
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    ports:
+      - "3306:3306"
+    volumes:
+      # Persist MySQL data using named volume
+      - mysql_data:/var/lib/mysql
+      # Optional: persist MySQL configuration
+      - mysql_config:/etc/mysql/conf.d
+    networks:
+      - messaging_network
+
+  web:
+    build: .
+    container_name: messaging_app_web
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_NAME=${MYSQL_DB}
+      - DB_USER=${MYSQL_USER}
+      - DB_PASSWORD=${MYSQL_PASSWORD}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DEBUG=${DEBUG}
+    depends_on:
+      - db
+    volumes:
+      # Mount current directory to container for development
+      - .:/app
+      # Persist Django media files
+      - media_files:/app/media
+      # Persist Django static files
+      - static_files:/app/staticfiles
+    networks:
+      - messaging_network
+    command: >
+      sh -c "
+        python3 manage.py migrate &&
+        python3 manage.py collectstatic --noinput &&
+        python3 manage.py runserver 0.0.0.0:8000
+      "
+
+# Named volumes for data persistence
+volumes:
+  # MySQL data persistence - survives container restarts and recreation
+  mysql_data:
+    driver: local
+  # MySQL configuration persistence
+  mysql_config:
+    driver: local
+  # Django media files persistence
+  media_files:
+    driver: local
+  # Django static files persistence
+  static_files:
+    driver: local
+
+networks:
+  messaging_network:
+    driver: bridge

@@ -1,0 +1,422 @@
+#!/bin/bash
+
+# kubctl-0x03 - Rolling Update Monitor Script
+# ALX Backend Python Project - messaging_app
+# This script performs rolling updates and monitors for downtime
+
+set -e  # Exit on any error
+
+echo "🔄 Rolling Update Monitor Script"
+echo "==============================="
+
+# Function to print colored output
+print_success() {
+    echo -e "\033[32m✅ $1\033[0m"
+}
+
+print_error() {
+    echo -e "\033[31m❌ $1\033[0m"
+}
+
+print_info() {
+    echo -e "\033[34mℹ️  $1\033[0m"
+}
+
+print_warning() {
+    echo -e "\033[33m⚠️  $1\033[0m"
+}
+
+print_header() {
+    echo ""
+    echo "🔧 $1"
+    echo "$(printf '=%.0s' {1..60})"
+}
+
+# Variables
+DEPLOYMENT_NAME="django-messaging-blue"
+SERVICE_NAME="django-messaging-service"
+DEPLOYMENT_FILE="blue_deployment.yaml"
+TEST_INTERVAL=2  # seconds between requests
+MAX_CONSECUTIVE_FAILURES=3
+ROLLING_UPDATE_TIMEOUT=600  # 10 minutes
+
+# Temporary files for monitoring
+CURL_LOG="/tmp/rolling_update_curl.log"
+STATUS_LOG="/tmp/rolling_update_status.log"
+DOWNTIME_LOG="/tmp/downtime_detected.log"
+
+# Cleanup function
+cleanup() {
+    print_info "Cleaning up temporary files and background processes..."
+    
+    # Kill background monitoring processes
+    jobs -p | xargs -r kill 2>/dev/null || true
+    
+    # Remove temporary files
+    rm -f "$CURL_LOG" "$STATUS_LOG" "$DOWNTIME_LOG"
+    
+    print_info "Cleanup completed"
+}
+
+# Set trap to cleanup on script exit
+trap cleanup EXIT
+
+# Function to check prerequisites
+check_prerequisites() {
+    print_header "Checking Prerequisites"
+    
+    # Check kubectl
+    if ! command -v kubectl >/dev/null 2>&1; then
+        print_error "kubectl is not installed"
+        exit 1
+    fi
+    print_success "kubectl is available"
+    
+    # Check curl
+    if ! command -v curl >/dev/null 2>&1; then
+        print_error "curl is not installed"
+        exit 1
+    fi
+    print_success "curl is available"
+    
+    # Check cluster connection
+    if ! kubectl cluster-info >/dev/null 2>&1; then
+        print_error "Cannot connect to Kubernetes cluster"
+        exit 1
+    fi
+    print_success "Kubernetes cluster is accessible"
+    
+    # Check deployment exists
+    if ! kubectl get deployment "$DEPLOYMENT_NAME" >/dev/null 2>&1; then
+        print_error "Deployment '$DEPLOYMENT_NAME' not found"
+        print_info "Make sure you have deployed the blue deployment first"
+        exit 1
+    fi
+    print_success "Deployment '$DEPLOYMENT_NAME' found"
+    
+    # Check deployment file exists
+    if [ ! -f "$DEPLOYMENT_FILE" ]; then
+        print_error "Deployment file '$DEPLOYMENT_FILE' not found"
+        exit 1
+    fi
+    print_success "Deployment file '$DEPLOYMENT_FILE' found"
+    
+    # Check service exists
+    if ! kubectl get service "$SERVICE_NAME" >/dev/null 2>&1; then
+        print_error "Service '$SERVICE_NAME' not found"
+        exit 1
+    fi
+    print_success "Service '$SERVICE_NAME' found"
+}
+
+# Function to get service URL
+get_service_url() {
+    # Try to get the service via port-forwarding or minikube IP
+    local service_type=$(kubectl get service "$SERVICE_NAME" -o jsonpath='{.spec.type}')
+    local minikube_ip=""
+    
+    if command -v minikube >/dev/null 2>&1; then
+        minikube_ip=$(minikube ip 2>/dev/null || echo "")
+    fi
+    
+    if [ -n "$minikube_ip" ] && [ "$minikube_ip" != "" ]; then
+        # Use minikube IP with service port
+        local service_port=$(kubectl get service "$SERVICE_NAME" -o jsonpath='{.spec.ports[0].port}')
+        echo "http://$minikube_ip:$service_port"
+    else
+        # Fallback to localhost with port-forward
+        echo "http://localhost:8080"
+    fi
+}
+
+# Function to setup port forwarding if needed
+setup_port_forwarding() {
+    local service_url=$1
+    
+    if [[ "$service_url" == *"localhost"* ]]; then
+        print_info "Setting up port forwarding for testing..."
+        kubectl port-forward service/"$SERVICE_NAME" 8080:80 >/dev/null 2>&1 &
+        local pf_pid=$!
+        
+        # Wait a moment for port forwarding to establish
+        sleep 3
+        
+        # Test if port forwarding is working
+        if curl -s -o /dev/null -w "%{http_code}" "http://localhost:8080" >/dev/null 2>&1; then
+            print_success "Port forwarding established"
+            echo $pf_pid
+        else
+            print_warning "Port forwarding may not be ready"
+            echo $pf_pid
+        fi
+    else
+        echo ""
+    fi
+}
+
+# Function to monitor application availability
+monitor_availability() {
+    local service_url=$1
+    local duration=$2
+    
+    print_info "Starting availability monitoring for $duration seconds..."
+    print_info "Testing URL: $service_url"
+    
+    local start_time=$(date +%s)
+    local end_time=$((start_time + duration))
+    local total_requests=0
+    local successful_requests=0
+    local failed_requests=0
+    local consecutive_failures=0
+    local downtime_periods=0
+    local max_response_time=0
+    local min_response_time=9999
+    local total_response_time=0
+    
+    # Initialize logs
+    echo "Rolling Update Availability Test - $(date)" > "$CURL_LOG"
+    echo "Timestamp,Status,ResponseTime,HTTPCode" >> "$CURL_LOG"
+    
+    while [ $(date +%s) -lt $end_time ]; do
+        local current_time=$(date +%s)
+        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        
+        # Make request and measure response time
+        local start_request=$(date +%s.%3N)
+        local http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 5 \
+            --max-time 10 \
+            "$service_url" 2>/dev/null || echo "000")
+        local end_request=$(date +%s.%3N)
+        local response_time=$(echo "$end_request - $start_request" | bc -l 2>/dev/null || echo "0")
+        
+        total_requests=$((total_requests + 1))
+        
+        # Convert response time to integer milliseconds for comparison
+        local response_time_ms=$(echo "$response_time * 1000" | bc -l 2>/dev/null | cut -d. -f1)
+        total_response_time=$(echo "$total_response_time + $response_time" | bc -l 2>/dev/null || echo "$total_response_time")
+        
+        # Update min/max response times
+        if [ "$response_time_ms" -gt "$max_response_time" ]; then
+            max_response_time=$response_time_ms
+        fi
+        if [ "$response_time_ms" -lt "$min_response_time" ] && [ "$response_time_ms" -gt 0 ]; then
+            min_response_time=$response_time_ms
+        fi
+        
+        # Check if request was successful
+        if [[ "$http_code" =~ ^[23] ]]; then
+            successful_requests=$((successful_requests + 1))
+            consecutive_failures=0
+            echo "$timestamp,SUCCESS,$response_time,$http_code" >> "$CURL_LOG"
+            printf "\r⏱️  Requests: %d | Success: %d | Failed: %d | Response: %.3fs | HTTP: %s" \
+                $total_requests $successful_requests $failed_requests $response_time $http_code
+        else
+            failed_requests=$((failed_requests + 1))
+            consecutive_failures=$((consecutive_failures + 1))
+            echo "$timestamp,FAILED,$response_time,$http_code" >> "$CURL_LOG"
+            printf "\r❌ Requests: %d | Success: %d | Failed: %d | Response: %.3fs | HTTP: %s" \
+                $total_requests $successful_requests $failed_requests $response_time $http_code
+            
+            # Detect potential downtime
+            if [ $consecutive_failures -ge $MAX_CONSECUTIVE_FAILURES ]; then
+                downtime_periods=$((downtime_periods + 1))
+                echo "$timestamp - Potential downtime detected (consecutive failures: $consecutive_failures)" >> "$DOWNTIME_LOG"
+            fi
+        fi
+        
+        sleep $TEST_INTERVAL
+    done
+    
+    echo ""  # New line after progress updates
+    
+    # Calculate statistics
+    local success_rate=0
+    if [ $total_requests -gt 0 ]; then
+        success_rate=$(echo "scale=2; $successful_requests * 100 / $total_requests" | bc -l 2>/dev/null || echo "0")
+    fi
+    
+    local avg_response_time=0
+    if [ $total_requests -gt 0 ]; then
+        avg_response_time=$(echo "scale=3; $total_response_time / $total_requests" | bc -l 2>/dev/null || echo "0")
+    fi
+    
+    # Save statistics
+    {
+        echo "=== Rolling Update Availability Report ==="
+        echo "Test Duration: $duration seconds"
+        echo "Total Requests: $total_requests"
+        echo "Successful Requests: $successful_requests"
+        echo "Failed Requests: $failed_requests"
+        echo "Success Rate: $success_rate%"
+        echo "Average Response Time: ${avg_response_time}s"
+        echo "Min Response Time: ${min_response_time}ms"
+        echo "Max Response Time: ${max_response_time}ms"
+        echo "Downtime Periods Detected: $downtime_periods"
+        echo "Max Consecutive Failures: $consecutive_failures"
+    } > "$STATUS_LOG"
+    
+    return $failed_requests
+}
+
+# Function to get deployment status
+get_deployment_status() {
+    local status=$(kubectl get deployment "$DEPLOYMENT_NAME" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null || echo "Unknown")
+    local ready_replicas=$(kubectl get deployment "$DEPLOYMENT_NAME" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+    local total_replicas=$(kubectl get deployment "$DEPLOYMENT_NAME" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+    
+    echo "Status: $status | Ready: $ready_replicas/$total_replicas"
+}
+
+# Function to display current pods
+show_current_pods() {
+    print_header "Current Pod Status"
+    
+    print_info "Pods for deployment $DEPLOYMENT_NAME:"
+    kubectl get pods -l app=django-messaging-app,version=blue -o wide
+    
+    echo ""
+    print_info "Pod details:"
+    kubectl get pods -l app=django-messaging-app,version=blue -o custom-columns="NAME:.metadata.name,STATUS:.status.phase,READY:.status.conditions[?(@.type=='Ready')].status,RESTARTS:.status.containerStatuses[0].restartCount,AGE:.metadata.creationTimestamp"
+}
+
+# Main execution
+main() {
+    check_prerequisites
+    
+    print_header "Pre-Update Status"
+    
+    print_info "Current deployment status:"
+    kubectl get deployment "$DEPLOYMENT_NAME" -o wide
+    
+    echo ""
+    show_current_pods
+    
+    print_info "Current deployment image:"
+    kubectl get deployment "$DEPLOYMENT_NAME" -o jsonpath='{.spec.template.spec.containers[0].image}'
+    echo ""
+    
+    # Get service URL
+    SERVICE_URL=$(get_service_url)
+    print_info "Service URL for testing: $SERVICE_URL"
+    
+    # Setup port forwarding if needed
+    PF_PID=$(setup_port_forwarding "$SERVICE_URL")
+    
+    # Test initial connectivity
+    print_info "Testing initial connectivity..."
+    if curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL" | grep -q "200\|301\|302"; then
+        print_success "Application is responding"
+    else
+        print_warning "Application might not be fully ready"
+    fi
+    
+    print_header "Starting Rolling Update"
+    
+    print_info "Applying updated deployment file: $DEPLOYMENT_FILE"
+    
+    # Start availability monitoring in background
+    print_info "Starting continuous availability monitoring..."
+    monitor_availability "$SERVICE_URL" 120 &  # Monitor for 2 minutes
+    MONITOR_PID=$!
+    
+    # Apply the updated deployment
+    kubectl apply -f "$DEPLOYMENT_FILE"
+    
+    print_success "Deployment update applied"
+    
+    print_header "Monitoring Rolling Update Progress"
+    
+    # Monitor rollout status
+    print_info "Watching rollout status..."
+    if kubectl rollout status deployment/"$DEPLOYMENT_NAME" --timeout="${ROLLING_UPDATE_TIMEOUT}s"; then
+        print_success "Rolling update completed successfully!"
+    else
+        print_error "Rolling update failed or timed out"
+        
+        # Show deployment events for debugging
+        print_info "Recent deployment events:"
+        kubectl describe deployment "$DEPLOYMENT_NAME" | tail -20
+        
+        exit 1
+    fi
+    
+    # Wait for monitoring to complete
+    print_info "Waiting for availability monitoring to complete..."
+    wait $MONITOR_PID 2>/dev/null || true
+    
+    print_header "Post-Update Verification"
+    
+    # Show final deployment status
+    print_info "Final deployment status:"
+    kubectl get deployment "$DEPLOYMENT_NAME" -o wide
+    
+    echo ""
+    show_current_pods
+    
+    print_info "Updated deployment image:"
+    kubectl get deployment "$DEPLOYMENT_NAME" -o jsonpath='{.spec.template.spec.containers[0].image}'
+    echo ""
+    
+    # Show availability report
+    if [ -f "$STATUS_LOG" ]; then
+        print_header "Availability Report"
+        cat "$STATUS_LOG"
+    fi
+    
+    # Show downtime if detected
+    if [ -f "$DOWNTIME_LOG" ] && [ -s "$DOWNTIME_LOG" ]; then
+        print_header "Downtime Detection"
+        print_warning "Potential downtime periods detected:"
+        cat "$DOWNTIME_LOG"
+    else
+        print_success "No significant downtime detected during rolling update!"
+    fi
+    
+    # Final connectivity test
+    print_header "Final Connectivity Test"
+    
+    print_info "Testing application after update..."
+    local final_test=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL" 2>/dev/null || echo "000")
+    
+    if [[ "$final_test" =~ ^[23] ]]; then
+        print_success "Application is responding correctly (HTTP $final_test)"
+    else
+        print_warning "Application response: HTTP $final_test"
+    fi
+    
+    # Show rollout history
+    print_info "Deployment rollout history:"
+    kubectl rollout history deployment/"$DEPLOYMENT_NAME"
+    
+    print_header "Rolling Update Summary"
+    
+    print_success "✨ Rolling update completed!"
+    
+    echo ""
+    echo "📊 Summary:"
+    echo "==========="
+    echo "• Deployment: $DEPLOYMENT_NAME"
+    echo "• Update Method: Rolling Update"
+    echo "• Monitoring Duration: 2 minutes"
+    echo "• Service URL: $SERVICE_URL"
+    
+    if [ -f "$STATUS_LOG" ]; then
+        local success_rate=$(grep "Success Rate:" "$STATUS_LOG" | cut -d: -f2 | tr -d ' ')
+        local total_requests=$(grep "Total Requests:" "$STATUS_LOG" | cut -d: -f2 | tr -d ' ')
+        echo "• Availability: $success_rate ($total_requests total requests)"
+    fi
+    
+    echo ""
+    echo "🔧 Useful commands:"
+    echo "==================="
+    echo "• Check pods: kubectl get pods -l app=django-messaging-app,version=blue"
+    echo "• View logs: kubectl logs -l app=django-messaging-app,version=blue"
+    echo "• Rollback: kubectl rollout undo deployment/$DEPLOYMENT_NAME"
+    echo "• History: kubectl rollout history deployment/$DEPLOYMENT_NAME"
+    
+    print_success "Rolling update process completed! 🎉"
+}
+
+# Run main function
+main "$@"

@@ -1,0 +1,137 @@
+# Kubernetes Ingress Configuration for Django Messaging App
+# ALX Backend Python Project - messaging_app
+
+---
+# Ingress Resource Configuration
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: django-messaging-ingress
+  namespace: default
+  labels:
+    app: django-messaging-app
+    component: ingress
+  annotations:
+    # Nginx Ingress Controller specific annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    
+    # Additional Nginx configurations
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    
+    # CORS settings (if needed)
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+
+spec:
+  # Ingress class specification (for newer Kubernetes versions)
+  ingressClassName: nginx
+  
+  # Rules for routing traffic
+  rules:
+  # Default host rule (works with minikube IP or localhost)
+  - host: django-messaging.local
+    http:
+      paths:
+      # Route for Django API endpoints
+      - path: /api/(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: django-messaging-service
+            port:
+              number: 80
+      
+      # Route for Django admin interface
+      - path: /admin/(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: django-messaging-service
+            port:
+              number: 80
+      
+      # Route for static files
+      - path: /static/(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: django-messaging-service
+            port:
+              number: 80
+      
+      # Route for media files
+      - path: /media/(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: django-messaging-service
+            port:
+              number: 80
+      
+      # Default route for the main application
+      - path: /(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: django-messaging-service
+            port:
+              number: 80
+  
+  # Alternative rule without specific host (fallback)
+  - http:
+      paths:
+      # API routes
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: django-messaging-service
+            port:
+              number: 80
+      
+      # Admin routes  
+      - path: /admin
+        pathType: Prefix
+        backend:
+          service:
+            name: django-messaging-service
+            port:
+              number: 80
+      
+      # Root path
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: django-messaging-service
+            port:
+              number: 80
+
+---
+# Optional: Service modification to work better with Ingress
+# This ensures the service is properly configured for Ingress
+apiVersion: v1
+kind: Service
+metadata:
+  name: django-messaging-service
+  labels:
+    app: django-messaging-app
+    component: web
+spec:
+  type: ClusterIP  # Must be ClusterIP for Ingress
+  selector:
+    app: django-messaging-app
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  sessionAffinity: None

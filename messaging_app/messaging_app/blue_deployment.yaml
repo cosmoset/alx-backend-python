@@ -1,0 +1,121 @@
+# Blue Deployment - Current Production Version
+# ALX Backend Python Project - messaging_app
+# Blue-Green Deployment Strategy
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-messaging-blue
+  labels:
+    app: django-messaging-app
+    version: blue
+    component: web
+    deployment-strategy: blue-green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: django-messaging-app
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: django-messaging-app
+        version: blue
+        component: web
+    spec:
+      containers:
+      - name: django-app
+        # Blue version - updated to v2.0 for rolling update
+        image: django-messaging-app:v2.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        
+        # Environment variables for Blue version
+        env:
+        - name: DEBUG
+          value: "False"
+        - name: ALLOWED_HOSTS
+          value: "*"
+        - name: DATABASE_ENGINE
+          value: "django.db.backends.sqlite3"
+        - name: DATABASE_NAME
+          value: "/app/db.sqlite3"
+        - name: VERSION
+          value: "blue-v2.0"
+        - name: DEPLOYMENT_COLOR
+          value: "blue"
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health/
+            port: 8000
+            httpHeaders:
+            - name: X-Deployment-Version
+              value: "blue"
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /ready/
+            port: 8000
+            httpHeaders:
+            - name: X-Deployment-Version
+              value: "blue"
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        # Resource limits
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        
+        # Volume mounts
+        volumeMounts:
+        - name: app-storage
+          mountPath: /app/db
+        - name: logs-volume
+          mountPath: /app/logs
+      
+      volumes:
+      - name: app-storage
+        emptyDir: {}
+      - name: logs-volume
+        emptyDir: {}
+      
+      restartPolicy: Always
+
+---
+# Blue Service (for internal testing and monitoring)
+apiVersion: v1
+kind: Service
+metadata:
+  name: django-messaging-blue-service
+  labels:
+    app: django-messaging-app
+    version: blue
+    component: web
+spec:
+  type: ClusterIP
+  selector:
+    app: django-messaging-app
+    version: blue
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http

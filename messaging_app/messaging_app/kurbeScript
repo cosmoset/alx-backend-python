@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# kurbeScript - Kubernetes Cluster Setup and Verification
+# ALX Backend Python - Messaging App Project
+# This script starts a Kubernetes cluster, verifies it's running, and retrieves pods
+
+set -e  # Exit on any error
+
+echo "🚀 Starting Kubernetes Cluster Setup..."
+echo "========================================"
+
+# Function to check if command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Function to print colored output
+print_success() {
+    echo -e "\033[32m✅ $1\033[0m"
+}
+
+print_error() {
+    echo -e "\033[31m❌ $1\033[0m"
+}
+
+print_info() {
+    echo -e "\033[34mℹ️  $1\033[0m"
+}
+
+print_warning() {
+    echo -e "\033[33m⚠️  $1\033[0m"
+}
+
+# Check if minikube is installed
+echo "🔍 Checking if minikube is installed..."
+if ! command_exists minikube; then
+    print_error "Minikube is not installed!"
+    print_info "Please install minikube first:"
+    print_info "curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64"
+    print_info "sudo install minikube-linux-amd64 /usr/local/bin/minikube"
+    exit 1
+fi
+print_success "Minikube is installed"
+
+# Check if kubectl is installed
+echo "🔍 Checking if kubectl is installed..."
+if ! command_exists kubectl; then
+    print_error "kubectl is not installed!"
+    print_info "Please install kubectl first"
+    exit 1
+fi
+print_success "kubectl is installed"
+
+# Check minikube status
+echo "🔍 Checking current minikube status..."
+MINIKUBE_STATUS=$(minikube status --format='{{.Host}}' 2>/dev/null || echo "Stopped")
+
+if [ "$MINIKUBE_STATUS" = "Running" ]; then
+    print_info "Minikube is already running"
+else
+    print_info "Starting minikube cluster..."
+    echo "⏳ This may take a few minutes..."
+    
+    # Start minikube with error handling
+    if minikube start; then
+        print_success "Minikube cluster started successfully!"
+    else
+        print_error "Failed to start minikube cluster"
+        print_info "Troubleshooting tips:"
+        print_info "1. Make sure Docker is running: sudo service docker start"
+        print_info "2. Try with different driver: minikube start --driver=virtualbox"
+        print_info "3. Check available drivers: minikube start --help"
+        exit 1
+    fi
+fi
+
+echo ""
+echo "🔍 Verifying cluster is running..."
+echo "=================================="
+
+# Verify cluster info
+print_info "Getting cluster information..."
+if kubectl cluster-info; then
+    print_success "Cluster is running and accessible!"
+else
+    print_error "Failed to get cluster info"
+    exit 1
+fi
+
+echo ""
+echo "📋 Retrieving available pods..."
+echo "==============================="
+
+# Get pods from all namespaces
+print_info "Fetching pods from all namespaces..."
+echo ""
+echo "Pods in default namespace:"
+echo "--------------------------"
+kubectl get pods --namespace=default
+
+echo ""
+echo "Pods in kube-system namespace:"
+echo "------------------------------"
+kubectl get pods --namespace=kube-system
+
+echo ""
+echo "All pods across all namespaces:"
+echo "-------------------------------"
+kubectl get pods --all-namespaces
+
+echo ""
+echo "📊 Cluster Summary:"
+echo "==================="
+print_info "Nodes in cluster:"
+kubectl get nodes
+
+print_info "Available namespaces:"
+kubectl get namespaces
+
+echo ""
+print_success "✨ Kubernetes cluster setup completed successfully!"
+print_info "Your cluster is ready for use."
+print_info "You can now deploy applications using kubectl commands."
+
+echo ""
+echo "🔧 Useful commands for next steps:"
+echo "=================================="
+echo "• Check cluster status: minikube status"
+echo "• Stop cluster: minikube stop"
+echo "• Delete cluster: minikube delete"
+echo "• Access dashboard: minikube dashboard"
+echo "• Get cluster IP: minikube ip"
+
+echo ""
+print_success "Script execution completed!"

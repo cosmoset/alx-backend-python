@@ -1,0 +1,144 @@
+# Green Deployment - New Version for Testing
+# ALX Backend Python Project - messaging_app
+# Blue-Green Deployment Strategy
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-messaging-green
+  labels:
+    app: django-messaging-app
+    version: green
+    component: web
+    deployment-strategy: blue-green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: django-messaging-app
+      version: green
+  template:
+    metadata:
+      labels:
+        app: django-messaging-app
+        version: green
+        component: web
+    spec:
+      containers:
+      - name: django-app
+        # Green version - new release for testing
+        image: django-messaging-app:v2.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        
+        # Environment variables for Green version
+        env:
+        - name: DEBUG
+          value: "False"
+        - name: ALLOWED_HOSTS
+          value: "*"
+        - name: DATABASE_ENGINE
+          value: "django.db.backends.sqlite3"
+        - name: DATABASE_NAME
+          value: "/app/db.sqlite3"
+        - name: VERSION
+          value: "green-v2.0"
+        - name: DEPLOYMENT_COLOR
+          value: "green"
+        - name: NEW_FEATURES_ENABLED
+          value: "true"
+        
+        # Health checks with updated paths for new version
+        livenessProbe:
+          httpGet:
+            path: /health/
+            port: 8000
+            httpHeaders:
+            - name: X-Deployment-Version
+              value: "green"
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /ready/
+            port: 8000
+            httpHeaders:
+            - name: X-Deployment-Version
+              value: "green"
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        # Resource limits (potentially higher for new version)
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "150m"
+          limits:
+            memory: "1Gi"
+            cpu: "750m"
+        
+        # Volume mounts
+        volumeMounts:
+        - name: app-storage
+          mountPath: /app/db
+        - name: logs-volume
+          mountPath: /app/logs
+        - name: config-volume
+          mountPath: /app/config
+      
+      volumes:
+      - name: app-storage
+        emptyDir: {}
+      - name: logs-volume
+        emptyDir: {}
+      - name: config-volume
+        configMap:
+          name: django-green-config
+          optional: true
+      
+      restartPolicy: Always
+
+---
+# Green Service (for internal testing)
+apiVersion: v1
+kind: Service
+metadata:
+  name: django-messaging-green-service
+  labels:
+    app: django-messaging-app
+    version: green
+    component: web
+spec:
+  type: ClusterIP
+  selector:
+    app: django-messaging-app
+    version: green
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+
+---
+# ConfigMap for Green deployment (new features configuration)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: django-green-config
+  labels:
+    app: django-messaging-app
+    version: green
+data:
+  NEW_FEATURES: "enabled"
+  FEATURE_FLAGS: "messaging_v2,real_time_chat,file_upload"
+  LOG_LEVEL: "INFO"
+  CACHE_ENABLED: "true"
